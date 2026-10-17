@@ -9,6 +9,8 @@ hits คือผลจาก retrieval.search เป็น list ของ (chun
 ค่าตั้งต้นตอนยังไม่ทำ: ไม่เรียก LLM เลย ข้อสอบปรนัยตอบ "ก" ทุกข้อ และโจทย์โค้ดได้ฟังก์ชันว่างที่ raise NotImplementedError
 (ทำส่วนนี้ก่อน เพราะถ้ายังไม่ทำ ส่วนอื่นจะไม่มีผลต่อคะแนนเลย)
 """
+import re
+
 from student import settings  # noqa: F401 — MAX_CONTEXT_CHARS
 
 
@@ -47,8 +49,14 @@ def build_mc_prompt(question: str, options: list[tuple[str, str]], hits) -> list
 
     # --- ตรวจจับคำถามเชิงปฏิเสธ ---
     negation_hint = ""
-    neg_keywords = ["ไม่", "ยกเว้น", "ผิด", "ไม่ใช่", "ไม่ถูก", "ไม่ได้", "ไม่เป็น", "ข้อใดผิด", "ข้อใดไม่", "ข้อใดไม่ใช่"]
-    if any(kw in question for kw in neg_keywords):
+    neg_patterns = [
+        r"(?:ข้อใด|ข้อความใด|ประโยคใด|ข้อสรุปใด|เงื่อนไขใด).*(?:ไม่ถูกต้อง|ไม่ใช่|กล่าวผิด|ระบุผิด|ไม่จริง|ไม่ถูก|ไม่เข้าพวก|ไม่สัมพันธ์|ไม่เข้าข่าย|ไม่ตรง|ไม่สอดคล้อง|ผิด|เป็นเท็จ)",
+        r"(?:ไม่ถูกต้อง|ไม่ใช่|กล่าวผิด|ระบุผิด|ไม่จริง|ไม่ถูก|เป็นเท็จ)\s*ตาม(?:เอกสาร|คู่มือ|หลัก)",
+        r"ยกเว้นข้อใด",
+        r"(?:ข้อใด|ข้อความใด).*(?:ยกเว้น|เว้นแต่)",
+        r"(?:ยกเว้น|เว้นแต่)\s*(?:ข้อใด|ข้อความใด)",
+    ]
+    if any(re.search(pat, question) for pat in neg_patterns):
         negation_hint = (
             "\n🚨 ข้อควรระวังพิเศษ: ข้อนี้เป็นคำถามเชิงปฏิเสธ (ถามหาข้อที่ผิด / ไม่ใช่ / ไม่ถูกต้อง / ยกเว้น)!\n"
             "- ข้อความที่ข้อมูลตรงกับเอกสารถือเป็นข้อความที่ 'ถูกต้อง' (ห้ามเลือกเด็ดขาด!)\n"
@@ -63,11 +71,12 @@ def build_mc_prompt(question: str, options: list[tuple[str, str]], hits) -> list
         "2. If the documents conflict with your general knowledge, ALWAYS follow the documents. "
         "For example, if the document explicitly states that lowercase inputs are converted to uppercase and accepted as valid "
         "(e.g. bb-cake-26 is converted to BB-CAKE-26), follow that rule and NEVER claim it is rejected.\n"
-        "3. For calculation or reasoning questions, check ALL table columns carefully:\n"
-        "   - Check 'ยอดซื้อขั้นต่ำ': if purchase total < minimum purchase, discount is 0.\n"
-        "   - Check 'ส่วนลดสูงสุดต่อบิล': if calculated discount exceeds the maximum discount cap, the discount MUST be capped at the maximum discount (e.g. 10% of 1,000 = 100, but cap is 50, so the discount is 50, NOT 100).\n"
-        "   - There is NO maximum purchase ceiling unless explicitly stated. Do NOT confuse maximum discount cap with purchase ceiling.\n"
-        "4. If the question contains negation (ไม่, ยกเว้น, ผิด, ไม่ใช่), identify which option is false or contrary to the reference documents.\n"
+        "3. For calculation or reasoning questions, check ALL table columns and rules carefully:\n"
+        "   - Check 'ยอดซื้อขั้นต่ำ' (minimum spend): if total < minimum spend, discount is 0. Note that total >= minimum spend IS eligible.\n"
+        "   - Check discount type: fixed cash discount (ลดเป็นเงินสด e.g. 30 หรือ 50 บาท) is a fixed baht amount, NOT a percentage! Percentage discount (ลดเป็นเปอร์เซ็นต์ e.g. 10%) is calculated as total * (percent / 100).\n"
+        "   - Check 'ส่วนลดสูงสุดต่อบิล' (maximum discount cap): if the calculated discount exceeds the cap, cap the discount at that maximum (e.g. 10% of 1,000 = 100, but cap is 50, so discount is 50). Do NOT confuse discount cap with purchase ceiling.\n"
+        "   - Unrecognized coupon codes get 0 discount.\n"
+        "4. When a question specifically asks for an incorrect/false statement (e.g. ถามหาข้อที่ไม่ถูกต้อง, ไม่ใช่, ผิด, ยกเว้น), identify and choose the option that is FALSE or contrary to the reference documents. Otherwise, choose the option that is TRUE and best supported by the documents.\n"
         "5. The choices in 'ตัวเลือก:' are shuffled. Carefully match your chosen answer to the exact key (ก, ข, ค, ง, จ) assigned to it in the 'ตัวเลือก:' list.\n"
         "6. Reply strictly in JSON: {\"reason\": \"detailed step-by-step reasoning in Thai\", \"answer\": \"<exact option key>\"}"
     )
@@ -81,8 +90,9 @@ def build_mc_prompt(question: str, options: list[tuple[str, str]], hits) -> list
     if context:
         user_parts.append(
             "คำสั่ง: อ่านเอกสารอ้างอิงอย่างละเอียด:\n"
-            "- หากเป็นคำถามเชิงปฏิเสธ ให้เลือกตัวเลือกที่ 'ผิด' หรือ 'ไม่ตรงกับเอกสาร'\n"
-            "- ตรวจสอบเงื่อนไขยอดซื้อขั้นต่ำและ 'ส่วนลดสูงสุดต่อบิล' ให้ครบถ้วน (หากส่วนลดเกินเพดานส่วนลดสูงสุด ให้ตอบตามเพดานส่วนลด)\n"
+            "- หากคำถามถามหาข้อที่ผิด/ไม่ใช่/ยกเว้น ให้เลือกตัวเลือกที่ผิดหรือไม่ตรงกับเอกสาร\n"
+            "- หากเป็นคำถามปกติ ให้เลือกตัวเลือกที่ถูกต้องและสอดคล้องกับเอกสารมากที่สุด\n"
+            "- ตรวจสอบเงื่อนไขยอดซื้อขั้นต่ำและส่วนลดสูงสุดต่อบิลให้ครบถ้วน (หากส่วนลดเกินเพดานส่วนลดสูงสุด ให้ตอบตามเพดานส่วนลด)\n"
             "- ปฏิบัติตามกฎในเอกสารอย่างเคร่งครัด\n"
             "- วิเคราะห์ทีละขั้นตอนใน reason ให้ชัดเจน ตรวจสอบว่าตรงกับ key (ก, ข, ค, ง, จ) ใด แล้วระบุ key นั้นใน answer"
         )
@@ -123,14 +133,17 @@ def build_code_prompt(requirement: str, signature: str | None, entry_point: str 
         "2. Do NOT use print() or input(). The function MUST return the result.\n"
         "3. Follow the exact function signature and entry_point provided.\n"
         "4. FORBIDDEN FUNCTIONS & METHODS:\n"
-        "   - Read the requirement carefully for any forbidden keywords (e.g. 'ห้ามใช้ max', 'ห้ามใช้ min', 'ห้ามใช้ sorted', 'ห้ามใช้ sort', 'ห้ามใช้ sum', 'ห้ามใช้ eval').\n"
-        "   - If any function is forbidden, DO NOT call that built-in or method (e.g. do not call `.sort()` if sort/sorted is forbidden).\n"
-        "   - Implement the operation manually using basic loops (`for`/`while`) and `if` conditions.\n"
-        "5. EDGE CASES & BOUNDARY CHECKS:\n"
+        "   - Read the requirement carefully for any forbidden keywords (e.g. 'ห้ามใช้ max', 'ห้ามใช้ min', 'ห้ามใช้ sorted', 'ห้ามใช้ sort', 'ห้ามใช้ sum', 'ห้ามใช้ eval', 'ห้ามใช้ len', 'ห้ามใช้ reversed').\n"
+        "   - If any function or method is forbidden, DO NOT call that built-in or method under any circumstances (e.g. do not call `.sort()` if sort/sorted is forbidden; do not call `sum()` if sum is forbidden).\n"
+        "   - Implement the operation manually using basic loops (`for`/`while`) and conditions (`if`/`else`).\n"
+        "5. DEFENSIVE CHECKS & EDGE CASES:\n"
         "   - Handle boundary values: empty string `\"\"`, empty list `[]`, 0, negative values, and None.\n"
+        "   - Guard against ZeroDivisionError: before any division or modulo (`/`, `//`, `%`), check if denominator == 0, and return 0.0 or the specified fallback.\n"
+        "   - Guard against IndexError: check list bounds before indexing.\n"
+        "   - If input is empty and an average/aggregation is asked, check requirement for fallback (usually 0.0 or None).\n"
         "   - If the requirement specifies fallback values (e.g. 'ถ้าไม่พบให้คืนค่า None' or 'คืนค่า 0' or 'คืนค่า -1'), follow it strictly.\n"
         "6. EXACT RETURN TYPES:\n"
-        "   - Ensure return type matches signature (e.g. float for money/discount/division, int for count/index, bool for predicate).\n"
+        "   - Ensure return type matches signature (e.g. float for money/discount/division, int for count/index, bool for predicate, list/dict/str as specified).\n"
         "7. ALWAYS import all needed standard modules at the top of the code (e.g. `import re`, `import math`).\n"
         "8. ALWAYS initialize return/calculation variables (e.g. `discount = 0.0`) at the very top of the function to prevent UnboundLocalError.\n"
         "9. TABLE-BASED RULES (if reference provided):\n"
@@ -139,7 +152,7 @@ def build_code_prompt(requirement: str, signature: str | None, entry_point: str 
         "   - For EACH coupon, check its specific minimum purchase: if `total < coupon_min_spend`: return 0.0. Note that `total >= coupon_min_spend` is valid!\n"
         "   - Check the discount type: cash discount ('ลดเป็นเงินสด') is a fixed amount (e.g. 30.0), NOT a percentage! Percentage discount ('เปอร์เซ็นต์') is `total * (percent / 100.0)`.\n"
         "   - Maximum cap per bill ('ส่วนลดสูงสุดต่อบิล'): If a numerical cap is specified for that coupon, apply `discount = min(discount, float(cap))`. If cap is 'ไม่มี' or None, do NOT limit.\n"
-        "   - Cash discounts cannot exceed total purchase: `discount = min(discount, total)`.\n"
+        "   - Cash discounts cannot exceed total purchase: `discount = min(discount, float(total))`.\n"
         "   - Unrecognized codes must return 0.0.\n"
         "   - Follow negative instructions (e.g. if requirement says 'ไม่ต้องตรวจสถานะสมาชิกและวันหมดอายุ', do NOT check member tiers or expiration dates).\n"
         "10. Reply with a SINGLE ```python code block containing the imports and the function definition. No explanations."
@@ -171,8 +184,8 @@ def build_code_prompt(requirement: str, signature: str | None, entry_point: str 
 
     user_parts.append(
         "Write complete, working Python code.\n"
-        "- Check for any FORBIDDEN functions (e.g. max, min, sorted) and avoid them completely.\n"
-        "- Handle edge cases (empty collections, 0, negative numbers, not found fallbacks).\n"
+        "- Check for any FORBIDDEN functions (e.g. max, min, sorted, sort, sum, eval) and implement manual logic if forbidden.\n"
+        "- Guard against ZeroDivisionError and empty inputs (empty list, empty string, None).\n"
         "- Ensure exact return type matching signature.\n"
         "- Include all necessary imports at the top.\n"
         "Respond with a single ```python code block containing the imports and function definition."

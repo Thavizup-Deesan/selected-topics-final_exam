@@ -19,7 +19,7 @@ DOC_PREFIX = "search_document: "    # prefix ที่ nomic-embed-text ใช�
 QUERY_PREFIX = "search_query: "     # prefix ที่ nomic-embed-text ใช้กับคำค้น
 
 # ---------- Retrieval (student/retrieval.py) ----------
-TOP_K = 8                   # จำนวน chunk ที่ส่งให้ LLM ลอง 3–10 (ระบบรับได้สูงสุด 20)
+TOP_K = 6                   # จำนวน chunk ที่ส่งให้ LLM ลอง 3–10 (ระบบรับได้สูงสุด 20)
 QUERY_WITH_OPTIONS = True   # รวมข้อความของตัวเลือก ก–จ เข้าไปในคำค้นด้วย
 HYBRID_WEIGHT = 0.35        # น้ำหนักของคะแนน keyword ใน hybrid search (0 = vector อย่างเดียว)
 MIN_SCORE = None            # ตัด chunk ที่คะแนนต่ำกว่านี้ทิ้ง (None = ไม่ตัด)
